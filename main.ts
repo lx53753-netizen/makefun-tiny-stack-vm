@@ -7,6 +7,23 @@ import { join } from 'node:path';
 
 type Res = { buf: Uint8Array; code: number };
 
+// Opcode validity, indexed by opcode byte; built once at load instead of
+// re-evaluating a multi-range boolean on every executed instruction.
+const KNOWN = new Uint8Array(256);
+for (const r of [[0, 7], [16, 34], [48, 52], [64, 65], [80, 83]])
+  for (let i = r[0]; i <= r[1]; i++) KNOWN[i] = 1;
+
+// Stack effect per opcode, built once; replaces the per-step if/else chain
+// (and its per-step array literals) in the hot loop.
+const POPS = new Uint8Array(256);
+const PUSHES = new Uint8Array(256);
+for (let i = 0; i < 8; i++) { POPS[i] = [0, 0, 0, 1, 1, 2, 2, 3][i]; PUSHES[i] = [0, 1, 1, 0, 2, 2, 3, 3][i]; }
+for (let i = 16; i <= 34; i++) { POPS[i] = i === 23 || i === 27 ? 1 : 2; PUSHES[i] = 1; }
+POPS[49] = 1; POPS[50] = 1; POPS[64] = 1; PUSHES[64] = 1;
+POPS[65] = 2;
+POPS[80] = 1; POPS[81] = 1; POPS[83] = 1;
+PUSHES[82] = 1;
+
 function run(P: Uint8Array, N: Uint8Array): Res {
   const S = new Int32Array(256); // data stack
   const C = new Int32Array(64); // return addresses
@@ -19,19 +36,12 @@ function run(P: Uint8Array, N: Uint8Array): Res {
       if (steps === 1000000) die(10);
       if (pc < 0 || pc >= P.length) die(9);
       const op = P[pc];
-      const known = op < 8 || (op >= 16 && op <= 34) || (op >= 48 && op <= 52) || op === 64 || op === 65 || (op >= 80 && op <= 83);
-      if (!known) die(5);
+      if (!KNOWN[op]) die(5);
       const imm = op === 1 ? 1 : op === 2 ? 4 : op >= 48 && op <= 51 ? 2 : 0;
       if (pc + imm >= P.length) die(9);
       steps++;
       // pops / pushes of this opcode, checked before it may trap on its own
-      let pops = 0, pushes = 0;
-      if (op < 8) { pops = [0, 0, 0, 1, 1, 2, 2, 3][op]; pushes = [0, 1, 1, 0, 2, 2, 3, 3][op]; }
-      else if (op <= 34) { pops = op === 23 || op === 27 ? 1 : 2; pushes = 1; }
-      else if (op === 49 || op === 50 || op === 64) { pops = 1; pushes = op === 64 ? 1 : 0; }
-      else if (op === 65) pops = 2;
-      else if (op === 80 || op === 81 || op === 83) pops = 1;
-      else if (op === 82) pushes = 1;
+      const pops = POPS[op], pushes = PUSHES[op];
       if (sp < pops) die(2);
       if (sp - pops + pushes > 256) die(3);
       const nx = pc + 1 + imm;
